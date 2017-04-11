@@ -3,7 +3,12 @@
 #include "Instinct.h"
 #include "InstinctRobot.h"
 #include "InstinctWorld.h"
-#include <fstream>
+
+
+// Need to link with Ws2_32.lib, Mswsock.lib, and Advapi32.lib
+#pragma comment (lib, "Ws2_32.lib")
+#pragma comment (lib, "Mswsock.lib")
+#pragma comment (lib, "AdvApi32.lib")
 
 
 const char *pNodeTypeNames[INSTINCT_NODE_TYPES] =
@@ -15,12 +20,20 @@ const char *pNodeTypeNames[INSTINCT_NODE_TYPES] =
 	{ "A" },
 };
 
+unsigned char bWinsockInitialised = false;
+
 InstinctRobot::InstinctRobot(InstinctWorld *pWorld, const char cRobot, const char *pLogFileName, const char *pMonLogFileName, const unsigned int uiNamesBufferSize)
 {
 	_szLogFileName[0] = 0;
 	_uiMateInterval = 0;
 	_nIntervalQueue = 0;
 	_ulMatings = 0;
+	_szHostName[0] = 0;
+	_szPort[0] = 0;
+	_connectSocket = INVALID_SOCKET;
+	
+	GetSystemTimeAsFileTime(&sStartTime); // store the time when the robot instance is created
+
 	initMateIntervals();
 
 	if (pLogFileName)
@@ -45,9 +58,31 @@ void InstinctRobot::initMateIntervals(void)
 		_uiMateIntervals[i] = INITIAL_MATE_INTERVAL;
 	}
 }
-// when we destroy the robot, also destroy its plan
+
+// cleanup
 InstinctRobot::~InstinctRobot()
 {
+	char recvbuf[1024];
+	int iResult;
+
+	// close socket if it is open
+	if (_connectSocket != INVALID_SOCKET)
+	{
+		MessageBox(NULL, TEXT("Closing socket"), NULL, MB_OK);
+		// attempt a graceful close with handshake from the server
+		iResult = shutdown(_connectSocket, SD_SEND);
+		if (iResult != SOCKET_ERROR)
+		{
+			MessageBox(NULL, TEXT("Graceful socket close"), NULL, MB_OK);
+			// read all the data from the socket until the remote end disconnects nicely
+			while ((iResult = recv(_connectSocket, recvbuf, sizeof(recvbuf), 0)) > 0);
+		}
+		closesocket(_connectSocket);
+		_connectSocket = INVALID_SOCKET;
+	}
+
+
+	// when we destroy the robot, also destroy its plan
 	delete _pPlan;
 	delete _pNames;
 	delete _pMonitorPlanWorld;
@@ -106,6 +141,16 @@ MonitorPlanWorld * InstinctRobot::getMonitorPlanWorld(void)
 	return _pMonitorPlanWorld;
 }
 
+
+// store the Instinct Server parameters for remote logging
+void InstinctRobot::setInstinctServerParams(char *pHostName, char *pPort, char *pHostName2, char *pPort2)
+{
+	strncpy(_szHostName, pHostName, sizeof(_szHostName));
+	strncpy(_szPort, pPort, sizeof(_szPort));
+	_pMonitorPlanWorld->setHostParams(pHostName2, pPort2);
+}
+
+
 // The robot needs to sense the world
 int InstinctRobot::readSense(const Instinct::senseID nSense)
 {
@@ -162,36 +207,48 @@ unsigned int InstinctRobot::matingAverage(void)
 // Callback to Monitor plan node executions 
 unsigned char InstinctRobot::nodeExecuted(const Instinct::PlanNode * pPlanNode)
 {
+	if ((strlen(_szPort) > 0) && (strlen(_szHostName) > 0))
+		writeInstinctServer(pPlanNode, "E", NULL, 0, FALSE);
 	return writeLogFile(pPlanNode, "E", NULL, 0, _szLogFileName, _pNames);
 }
 
 // Callback to Monitor plan node success 
 unsigned char InstinctRobot::nodeSuccess(const Instinct::PlanNode * pPlanNode)
 {
+	if ((strlen(_szPort) > 0) && (strlen(_szHostName) > 0))
+		writeInstinctServer(pPlanNode, "S", NULL, 0, FALSE);
 	return writeLogFile(pPlanNode, "S", NULL, 0, _szLogFileName, _pNames);
 }
 
 // Callback to Monitor plan node pending 
 unsigned char InstinctRobot::nodeInProgress(const Instinct::PlanNode * pPlanNode)
 {
+	if ((strlen(_szPort) > 0) && (strlen(_szHostName) > 0))
+		writeInstinctServer(pPlanNode, "P", NULL, 0, FALSE);
 	return writeLogFile(pPlanNode, "P", NULL, 0, _szLogFileName, _pNames);
 }
 
 // Callback to Monitor plan node failure 
 unsigned char InstinctRobot::nodeFail(const Instinct::PlanNode * pPlanNode)
 {
+	if ((strlen(_szPort) > 0) && (strlen(_szHostName) > 0))
+		writeInstinctServer(pPlanNode, "F", NULL, 0, FALSE);
 	return writeLogFile(pPlanNode, "F", NULL, 0, _szLogFileName, _pNames);
 }
 
 // Callback to Monitor plan node error 
 unsigned char InstinctRobot::nodeError(const Instinct::PlanNode * pPlanNode)
 {
+	if ((strlen(_szPort) > 0) && (strlen(_szHostName) > 0))
+		writeInstinctServer(pPlanNode, "Z", NULL, 0, FALSE);
 	return writeLogFile(pPlanNode, "Z", NULL, 0, _szLogFileName, _pNames);
 }
 
 // Callback to Monitor plan sense measurement 
 unsigned char InstinctRobot::nodeSense(const Instinct::ReleaserType *pReleaser, const int nSenseValue)
 {
+	if ((strlen(_szPort) > 0) && (strlen(_szHostName) > 0))
+		writeInstinctServer(NULL, "R", pReleaser, nSenseValue, FALSE);
 	return writeLogFile(NULL, "R", pReleaser, nSenseValue, _szLogFileName, _pNames);
 }
 
@@ -203,6 +260,9 @@ MonitorPlanWorld::MonitorPlanWorld(InstinctRobot *pInstinctRobot, Instinct::CmdP
 	_szMonLogFileName[0] = 0;
 	_storedMateDrivePriority = 0;
 	_storedRobotChar = '*';
+	_szHostName[0] = 0;
+	_szPort[0] = 0;
+	_connectSocket = INVALID_SOCKET;
 
 
 	if (pMonLogFileName)
@@ -221,6 +281,25 @@ MonitorPlanWorld::MonitorPlanWorld(InstinctRobot *pInstinctRobot, Instinct::CmdP
 // when we destroy the Monitor, also destroy its plan
 MonitorPlanWorld::~MonitorPlanWorld()
 {
+	char recvbuf[1024];
+	int iResult;
+
+	// close socket if it is open
+	if (_connectSocket != INVALID_SOCKET)
+	{
+		// MessageBox(NULL, TEXT("Closing Monitor socket"), NULL, MB_OK);
+		// attempt a graceful close with handshake from the server
+		iResult = shutdown(_connectSocket, SD_SEND);
+		if (iResult != SOCKET_ERROR)
+		{
+			// MessageBox(NULL, TEXT("Graceful monitor socket close"), NULL, MB_OK);
+			// read all the data from the socket until the remote end disconnects nicely
+			while ((iResult = recv(_connectSocket, recvbuf, sizeof(recvbuf), 0)) > 0);
+		}
+		closesocket(_connectSocket);
+		_connectSocket = INVALID_SOCKET;
+	}
+
 	delete _pPlan;
 	delete _pNames;
 }
@@ -245,6 +324,33 @@ Instinct::Names * MonitorPlanWorld::getNames(void)
 {
 	return _pNames;
 }
+
+SOCKET MonitorPlanWorld::getConnectSocket(void)
+{
+	return _connectSocket;
+}
+
+void MonitorPlanWorld::setConnectSocket(SOCKET socket)
+{
+	_connectSocket = socket;
+}
+
+void MonitorPlanWorld::setHostParams(char *pHostName, char *pPort)
+{
+	strncpy(_szHostName, pHostName, sizeof(_szHostName));
+	strncpy(_szPort, pPort, sizeof(_szPort));
+}
+
+char * MonitorPlanWorld::getHostName(void)
+{
+	return _szHostName;
+}
+
+char * MonitorPlanWorld::getPort(void)
+{
+	return _szPort;
+}
+
 
 // The monitor needs to sense its world
 int MonitorPlanWorld::readSense(const Instinct::senseID nSense)
@@ -325,36 +431,48 @@ unsigned char MonitorPlanWorld::sleep(const int nSleepCount, const unsigned char
 // Callback to Monitor the Monitor plan node executions 
 unsigned char MonitorPlanWorld::nodeExecuted(const Instinct::PlanNode * pPlanNode)
 {
+	if ((strlen(_szPort) > 0) && (strlen(_szHostName) > 0))
+		_pRobot->writeInstinctServer(pPlanNode, "E", NULL, 0, TRUE);
 	return _pRobot->writeLogFile(pPlanNode, "E", NULL, 0, _szMonLogFileName, _pNames);
 }
 
 // Callback to Monitor the Monitor plan node success 
 unsigned char MonitorPlanWorld::nodeSuccess(const Instinct::PlanNode * pPlanNode)
 {
+	if ((strlen(_szPort) > 0) && (strlen(_szHostName) > 0))
+		_pRobot->writeInstinctServer(pPlanNode, "S", NULL, 0, TRUE);
 	return _pRobot->writeLogFile(pPlanNode, "S", NULL, 0, _szMonLogFileName, _pNames);
 }
 
 // Callback to Monitor the Monitor plan node pending 
 unsigned char MonitorPlanWorld::nodeInProgress(const Instinct::PlanNode * pPlanNode)
 {
+	if ((strlen(_szPort) > 0) && (strlen(_szHostName) > 0))
+		_pRobot->writeInstinctServer(pPlanNode, "P", NULL, 0, TRUE);
 	return _pRobot->writeLogFile(pPlanNode, "P", NULL, 0, _szMonLogFileName, _pNames);
 }
 
 // Callback to Monitor the Monitor plan node failure 
 unsigned char MonitorPlanWorld::nodeFail(const Instinct::PlanNode * pPlanNode)
 {
+	if ((strlen(_szPort) > 0) && (strlen(_szHostName) > 0))
+		_pRobot->writeInstinctServer(pPlanNode, "F", NULL, 0, TRUE);
 	return _pRobot->writeLogFile(pPlanNode, "F", NULL, 0, _szMonLogFileName, _pNames);
 }
 
 // Callback to Monitor the Monitor plan node error 
 unsigned char MonitorPlanWorld::nodeError(const Instinct::PlanNode * pPlanNode)
 {
+	if ((strlen(_szPort) > 0) && (strlen(_szHostName) > 0))
+		_pRobot->writeInstinctServer(pPlanNode, "Z", NULL, 0, TRUE);
 	return _pRobot->writeLogFile(pPlanNode, "Z", NULL, 0, _szMonLogFileName, _pNames);
 }
 
 // Callback to Monitor the Monitor plan sense measurement 
 unsigned char MonitorPlanWorld::nodeSense(const Instinct::ReleaserType *pReleaser, const int nSenseValue)
 {
+	if ((strlen(_szPort) > 0) && (strlen(_szHostName) > 0))
+		_pRobot->writeInstinctServer(NULL, "R", pReleaser, nSenseValue, TRUE);
 	return _pRobot->writeLogFile(NULL, "R", pReleaser, nSenseValue, _szMonLogFileName, _pNames);
 }
 
@@ -369,9 +487,12 @@ unsigned char InstinctRobot::writeLogFile(const Instinct::PlanNode * pPlanNode, 
 		__time64_t long_time;
 		char szTimeBuff[26];
 		errno_t err;
-		FILETIME sFileTime;
 		std::ofstream logfile;
-		char szSystemTimeBuff[30];
+		char szSystemTimeBuff[20];
+		FILETIME sFileTime;
+		_ULARGE_INTEGER uLargeNow;
+		_ULARGE_INTEGER uLargeStart;
+		unsigned long ulElapsedTime;
 
 		// Get time as 64-bit integer.
 		_time64(&long_time);
@@ -380,13 +501,20 @@ unsigned char InstinctRobot::writeLogFile(const Instinct::PlanNode * pPlanNode, 
 		if (err)
 			return false;
 		GetSystemTimeAsFileTime(&sFileTime);
-		sprintf_s(szSystemTimeBuff, "%010u.%010u", sFileTime.dwHighDateTime, sFileTime.dwLowDateTime);
+
+		// calculate elapsed time since the robot was initialised - to match output with R5
+		GetSystemTimeAsFileTime(&sFileTime); // gets time in 100nS intervals. We want mS so / 10,000
+		uLargeNow.u.LowPart = sFileTime.dwLowDateTime;
+		uLargeNow.u.HighPart = sFileTime.dwHighDateTime;
+		uLargeStart.u.LowPart = sStartTime.dwLowDateTime;
+		uLargeStart.u.HighPart = sStartTime.dwHighDateTime;
+		ulElapsedTime = (uLargeNow.QuadPart - uLargeStart.QuadPart) / 10000L;
+
+		sprintf_s(szSystemTimeBuff, "%010lu", ulElapsedTime);
+
 		// Convert time to an ASCII representation.
 		sprintf_s(szTimeBuff, "%04u-%02u-%02u %02u:%02u:%02u", 1900 + newtime.tm_year, 1 + newtime.tm_mon, newtime.tm_mday,
 																newtime.tm_hour, newtime.tm_min, newtime.tm_sec);
-		// err = asctime_s(szTimeBuff, 26, &newtime);
-		if (err)
-			return false;
 
 		logfile.open(pLogFileName, std::fstream::in | std::fstream::out | std::fstream::app);
 		if (logfile.is_open())
@@ -416,5 +544,153 @@ unsigned char InstinctRobot::writeLogFile(const Instinct::PlanNode * pPlanNode, 
 		}
 	}
 	return true;
+}
+
+// write output to Instinct Server. bMonitorPlan defines which socket to use.
+// Create and open the Socket on first invocation. If error occurs then don't try again.
+unsigned char InstinctRobot::writeInstinctServer(const Instinct::PlanNode * pPlanNode, const char *pType, const Instinct::ReleaserType *pReleaser, const int nSenseValue, const unsigned char bMonitorPlan)
+{
+	WSADATA wsaData;
+	int iResult;
+	SOCKET mySocket;
+	struct addrinfo *result = NULL, *ptr = NULL, hints;
+	char szBuffer[200];
+	wchar_t szErrorMsg[100];
+
+	// Initialize Winsock
+	if (!bWinsockInitialised)
+	{
+		iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
+		if (iResult != 0)
+		{
+			MessageBox(NULL, TEXT("WSAStartup failed."), TEXT("Windows Socket Error"), MB_ICONWARNING | MB_OK);
+			return false;
+		}
+		bWinsockInitialised = true;
+	}
+
+	// check if the correct socket is already open, if not attempt to open it
+	if (bMonitorPlan)
+		mySocket = _pMonitorPlanWorld->getConnectSocket();
+	else
+		mySocket = _connectSocket;
+
+	if (mySocket == INVALID_SOCKET)
+	{
+		ZeroMemory(&hints, sizeof(hints));
+		hints.ai_family = AF_UNSPEC;
+		hints.ai_socktype = SOCK_STREAM;
+		hints.ai_protocol = IPPROTO_TCP;
+
+		// Resolve the server address and port
+		iResult = getaddrinfo((bMonitorPlan ? _pMonitorPlanWorld->getHostName() : _szHostName), (bMonitorPlan ? _pMonitorPlanWorld->getPort() : _szPort), &hints, &result);
+		if (iResult != 0)
+		{
+			wcscpy(szErrorMsg, TEXT("getaddrinfo failed - Hostname not found"));
+		}
+		else
+		{
+			// Attempt to connect to an address until one succeeds
+			for (ptr = result; ptr != NULL; ptr = ptr->ai_next)
+			{
+
+				// Create a SOCKET for connecting to server
+				mySocket = socket(ptr->ai_family, ptr->ai_socktype, ptr->ai_protocol);
+				if (mySocket == INVALID_SOCKET)
+				{
+					wcscpy(szErrorMsg, TEXT("socket failed - Create Socket"));
+				}
+				else
+				{
+					// Connect to server.
+					iResult = connect(mySocket, ptr->ai_addr, (int)ptr->ai_addrlen);
+					if (iResult == SOCKET_ERROR)
+					{
+						closesocket(mySocket);
+						mySocket = INVALID_SOCKET;
+						continue;
+					}
+					break;
+				}
+			}
+			freeaddrinfo(result);
+
+			if (mySocket == INVALID_SOCKET)
+			{
+				wcscpy(szErrorMsg, TEXT("Unable to connect to server - Connect Socket"));
+			}
+			else
+			{
+				strcpy(szBuffer, "Robot Running ...\n");
+				iResult = send(mySocket, szBuffer, (int)strlen(szBuffer), 0);
+				if (iResult == SOCKET_ERROR)
+				{
+					wcscpy(szErrorMsg, TEXT("Socket send failed - Robot Running Message"));
+					closesocket(mySocket);
+					mySocket = INVALID_SOCKET;
+				}
+			}
+		}
+	}
+
+	// write log data to the correct socket
+	if (mySocket != INVALID_SOCKET)
+	{
+		FILETIME sFileTime;
+		_ULARGE_INTEGER uLargeNow;
+		_ULARGE_INTEGER uLargeStart;
+		unsigned long ulElapsedTime;
+
+		// calculate elapsed time since the robot was initialised - to match output with R5
+		GetSystemTimeAsFileTime(&sFileTime); // gets time in 100nS intervals. We want mS so / 10,000
+		uLargeNow.u.LowPart = sFileTime.dwLowDateTime;
+		uLargeNow.u.HighPart = sFileTime.dwHighDateTime;
+		uLargeStart.u.LowPart = sStartTime.dwLowDateTime;
+		uLargeStart.u.HighPart = sStartTime.dwHighDateTime;
+		ulElapsedTime = (uLargeNow.QuadPart - uLargeStart.QuadPart) / 10000L;
+
+		char szDisplayBuff[80];
+		Instinct::CmdPlanner *pPlan = bMonitorPlan ? _pMonitorPlanWorld->getPlan() : _pPlan;
+		if (pPlanNode)
+		{
+			pPlan->displayNodeCounters(szDisplayBuff, sizeof(szDisplayBuff), pPlanNode);
+			sprintf_s(szBuffer, "%010lu %s %s %s\n", ulElapsedTime, pType, pNodeTypeNames[pPlanNode->bNodeType], szDisplayBuff);
+		}
+		if (pReleaser)
+		{
+			pPlan->displayReleaser(szDisplayBuff, sizeof(szDisplayBuff), pReleaser);
+			sprintf_s(szBuffer, "%010lu %s %s %i\n", ulElapsedTime, pType, szDisplayBuff, nSenseValue);
+		}
+
+		iResult = send(mySocket, szBuffer, (int)strlen(szBuffer), 0);
+		if (iResult == SOCKET_ERROR)
+		{
+			wcscpy(szErrorMsg, TEXT("Socket send failed - Socket"));
+			closesocket(mySocket);
+			mySocket = INVALID_SOCKET;
+		}
+	}
+
+	if (bMonitorPlan)
+		_pMonitorPlanWorld->setConnectSocket(mySocket);
+	else
+		_connectSocket = mySocket;
+
+	if (mySocket == INVALID_SOCKET)
+	{
+		if (bMonitorPlan)
+		{
+			_pMonitorPlanWorld->setHostParams("", ""); // stop attempt to reconnect socket next time round
+		}
+		else
+		{
+			_szHostName[0] = 0;
+			_szPort[0] = 0;
+		}
+
+		MessageBox(NULL, szErrorMsg, TEXT("Comms Error"), MB_OK | MB_ICONQUESTION);
+	}
+
+	return (mySocket == INVALID_SOCKET ? false : true);
 }
 

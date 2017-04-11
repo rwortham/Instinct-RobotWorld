@@ -54,6 +54,11 @@ public:
 	unsigned char nodeSense(const Instinct::ReleaserType *pReleaser, const int nSenseValue);
 	Instinct::CmdPlanner * getPlan(void);
 	Instinct::Names * getNames(void);
+	SOCKET getConnectSocket(void);
+	void setConnectSocket(SOCKET socket);
+	void setHostParams(char *pHostName, char *pPort);
+	char * getHostName(void);
+	char * getPort(void);
 
 private:
 	unsigned char sleep(const int nSleepCount, const unsigned char bCheckForComplete); // stop and wait for SleepCount
@@ -66,6 +71,9 @@ private:
 	char _szMonLogFileName[MAX_PATH];
 	Instinct::instinctID _storedMateDrivePriority;
 	char _storedRobotChar;
+	char _szHostName[255];
+	char _szPort[10];
+	SOCKET _connectSocket;
 };
 
 // This is a very simple test robot. It includes some simple senses and an instinct plan
@@ -91,6 +99,7 @@ public:
 	unsigned char nodeError(const Instinct::PlanNode *pPlanNode);
 	unsigned char nodeSense(const Instinct::ReleaserType *pReleaser, const int nSenseValue);
 	unsigned char writeLogFile(const Instinct::PlanNode * pPlanNode, const char *pType, const Instinct::ReleaserType *pReleaser, const int nSenseValue, const char *pLogFileName, Instinct::Names *pNames);
+	unsigned char writeInstinctServer(const Instinct::PlanNode * pPlanNode, const char *pType, const Instinct::ReleaserType *pReleaser, const int nSenseValue, const unsigned char bMonitorPlan);
 	Instinct::CmdPlanner * getPlan(void);
 	Instinct::Names * getNames(void);
 	MonitorPlanWorld * getMonitorPlanWorld(void);
@@ -100,6 +109,7 @@ public:
 	unsigned int matingAverage(void);
 	unsigned long getMatings(void);
 	void resetMatings(void);
+	void setInstinctServerParams(char *pHostName, char *pPort, char *pHostName2, char *pPort2);
 
 private:
 	InstinctWorld *_pWorld;
@@ -108,6 +118,10 @@ private:
 	MonitorPlanWorld *_pMonitorPlanWorld;
 
 	char _szLogFileName[MAX_PATH];
+	char _szHostName[255];
+	char _szPort[10];
+	SOCKET _connectSocket;
+	FILETIME sStartTime;
 	unsigned int _uiMateInterval;
 	int _nIntervalQueue = 0;
 	unsigned int _uiMateIntervals[REMEMBERED_MATE_INTERVALS];

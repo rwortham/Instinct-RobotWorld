@@ -20,6 +20,7 @@
 #include "InstinctRobot.h"
 #include "InstinctWorld.h"
 #include "InstinctRobotWorld.h"
+#include <winsock2.h>
 
 #define NAMES_BUFFER_SIZE 2000
 #define MAX_ROBOTS 1000 // how many robots can we run
@@ -59,6 +60,7 @@ BOOL ShowTotals(HWND hDlg);
 BOOL ShowWorld(HWND hDlg);
 void LoadPlan(HWND hDlg, Instinct::CmdPlanner *pPlan, Instinct::Names *pNames, wchar_t *pPlanFile, unsigned char *pSuppressWarnings);
 
+extern unsigned char bWinsockInitialised;
 
 // Entry point
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
@@ -114,7 +116,8 @@ BOOL ExitInstance(void)
 }
 
 // make some new robots
-BOOL AddRobotsToWorld(HWND hDlg, int nHowMany, wchar_t *pPlanFile, wchar_t *pPlanFile2, const unsigned char *pbMonitor, const unsigned char *pbMonitorMon)
+BOOL AddRobotsToWorld(HWND hDlg, unsigned int uiHowMany, wchar_t *pPlanFile, char *pHostName, char *pPort,
+						wchar_t *pPlanFile2, char *pHostName2, char *pPort2, const unsigned char *pbMonitor, const unsigned char *pbMonitorMon)
 {
 	// make some robot log file names
 	static char cName = 'a';
@@ -124,11 +127,11 @@ BOOL AddRobotsToWorld(HWND hDlg, int nHowMany, wchar_t *pPlanFile, wchar_t *pPla
 
 	bSuppressWarnings = FALSE;
 
-	for (int i = 0; i < nHowMany; i++)
+	for (unsigned int i = 0; i < uiHowMany; i++)
 	{
 		if (nRobots >= MAX_ROBOTS) // we can't add any more robots
 		{
-			MessageBox(hDlg, L"Maximum of 100 robots added to the world", L"", MB_OK);
+			MessageBox(hDlg, L"Maximum of 1000 robots added to the world", L"", MB_OK);
 			break;
 		}
 		snprintf(szLogFileName, sizeof(szLogFileName), "logs\\RobLog-%c%c.txt", fName, cName);
@@ -144,6 +147,12 @@ BOOL AddRobotsToWorld(HWND hDlg, int nHowMany, wchar_t *pPlanFile, wchar_t *pPla
 		Instinct::CmdPlanner *pMonitorPlan = pMonitorPlanWorld->getPlan();
 		LoadPlan(hDlg, pMonitorPlan, pMonitorPlanWorld->getNames(), pPlanFile2, &bSuppressWarnings);
 		pMonitorPlan->setGlobalMonitorFlags(pbMonitorMon[0], pbMonitorMon[1], pbMonitorMon[2], pbMonitorMon[3], pbMonitorMon[4], pbMonitorMon[5]);
+
+		// just set the Instinct Server remote logging parameters for the first robot created
+		if (i == 0)
+		{
+			pRobot->setInstinctServerParams(pHostName, pPort, pHostName2, pPort2);
+		}
 
 
 		// this is very specific to a plan with the Mate Drive
@@ -183,7 +192,7 @@ BOOL AddRobotsToWorld(HWND hDlg, int nHowMany, wchar_t *pPlanFile, wchar_t *pPla
 		else
 			cName++;
 		// start the robots in different positions so we can see them
-		for (int j = 0; j < i; j++)
+		for (unsigned int j = 0; j < i; j++)
 			pRobot->executeAction(ACTION_TURN, 45, false);
 	}
 
@@ -199,6 +208,12 @@ BOOL RemoveRobotsFromWorld(void)
 		delete pRobot;
 	}
 	nRobots = 0;
+
+	if (bWinsockInitialised)
+	{
+		WSACleanup();
+		bWinsockInitialised = false;
+	}
 
 	return TRUE;
 }
@@ -321,6 +336,7 @@ INT_PTR CALLBACK MainDialogProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lPar
 			MB_ICONQUESTION | MB_YESNO) == IDYES)
 		{
 			KillTimer(hDlg, MY_TIMER);
+			RemoveRobotsFromWorld(); // we call this here to ensure that all sockets closed and WSACleanup is called
 			DestroyWindow(hDlg);
 		}
 		return TRUE;
@@ -337,10 +353,14 @@ INT_PTR CALLBACK MainDialogProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lPar
 INT_PTR MainCmdProc(HWND hDlg, WPARAM wParam, LPARAM lParam)
 {
 	HWND hDlgAbout;
-	int nRate;
-	int nHowManyRobots;
+	unsigned int uiRate;
+	unsigned int uiHowManyRobots;
 	wchar_t szPlanFile[MAX_PATH];
 	wchar_t szPlanFile2[MAX_PATH];
+	char szHostName[254];
+	char szHostName2[254];
+	char szPort[10];
+	char szPort2[10];
 	unsigned char bMonitor[6];
 	unsigned char bMonitorMon[6];
 
@@ -348,9 +368,19 @@ INT_PTR MainCmdProc(HWND hDlg, WPARAM wParam, LPARAM lParam)
 	{
 	case IDC_LOADPLAN:
 		szPlanFile[0] = L'\0';
+		szPlanFile2[0] = L'\0';
+		szHostName[0] = '\0';
+		szHostName2[0] = '\0';
+
 		GetDlgItemText(hDlg, IDC_PLANFILE, szPlanFile, sizeof(szPlanFile)/sizeof(wchar_t));
+		GetDlgItemTextA(hDlg, IDC_HOSTNAME, szHostName, sizeof(szHostName));
+		GetDlgItemTextA(hDlg, IDC_PORT, szPort, sizeof(szPort));
+
 		GetDlgItemText(hDlg, IDC_PLANFILE2, szPlanFile2, sizeof(szPlanFile2) / sizeof(wchar_t));
-		nHowManyRobots = GetDlgItemInt(hDlg, IDC_ROBOTS, NULL, FALSE);
+		GetDlgItemTextA(hDlg, IDC_HOSTNAME2, szHostName2, sizeof(szHostName2));
+		GetDlgItemTextA(hDlg, IDC_PORT2, szPort2, sizeof(szPort2));
+
+		uiHowManyRobots = GetDlgItemInt(hDlg, IDC_ROBOTS, NULL, FALSE);
 
 		bMonitor[0] = (BST_CHECKED & SendDlgItemMessage(hDlg, IDC_MON_EXECUTE, BM_GETSTATE, 0, 0L)) ? 1 : 0;
 		bMonitor[1] = (BST_CHECKED & SendDlgItemMessage(hDlg, IDC_MON_SUCCESS, BM_GETSTATE, 0, 0L)) ? 1 : 0;
@@ -367,15 +397,15 @@ INT_PTR MainCmdProc(HWND hDlg, WPARAM wParam, LPARAM lParam)
 		bMonitorMon[5] = (BST_CHECKED & SendDlgItemMessage(hDlg, IDC_MON_RELEASER2, BM_GETSTATE, 0, 0L)) ? 1 : 0;
 
 		// RemoveRobotsFromWorld();
-		AddRobotsToWorld(hDlg, min(nHowManyRobots, MAX_ROBOTS), szPlanFile, szPlanFile2, bMonitor, bMonitorMon);
+		AddRobotsToWorld(hDlg, min(uiHowManyRobots, MAX_ROBOTS), szPlanFile, szHostName, szPort, szPlanFile2, szHostName2, szPort2, bMonitor, bMonitorMon);
 		ShowTotals(hDlg);
 		ShowWorld(hDlg);
 		SetDlgItemInt(hDlg, IDC_TOTAL_ROBOTS, nRobots, FALSE);
 		return TRUE;
 
 	case IDC_START:
-		nRate = GetDlgItemInt(hDlg, IDC_RATE, NULL, FALSE);
-		SetTimer(hDlg, MY_TIMER, 1000/(nRate ? nRate : 1), NULL);
+		uiRate = GetDlgItemInt(hDlg, IDC_RATE, NULL, FALSE);
+		SetTimer(hDlg, MY_TIMER, 1000/(uiRate ? uiRate : 1), NULL);
 		EnableWindow(GetDlgItem(hDlg, IDC_START), FALSE);
 		EnableWindow(GetDlgItem(hDlg, IDC_STOP), TRUE);
 		return TRUE;
