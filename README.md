@@ -11,13 +11,14 @@ For full details see [Instinct Planner] page on the [my web site].
 Version
 ------
 1.0.0 - First public upload
+1.1.0 - Updated to allow remote real time plan debugging with ABOD3 or the Instinct-Server
 
 
 License
 ----
 The Instinct Robot World is Open Source Software distributed under the GNU GPL licence.
 
-Copyright (c) 2015 Robert H. Wortham
+Copyright (c) 2016-17 Robert H. Wortham
 
    [Instinct Planner]: <http://www.robwortham.com/instinct-planner/>
    [R5 Robot]: <http://www.robwortham.com/r5-robot/>
