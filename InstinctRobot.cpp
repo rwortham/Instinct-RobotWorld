@@ -68,12 +68,12 @@ InstinctRobot::~InstinctRobot()
 	// close socket if it is open
 	if (_connectSocket != INVALID_SOCKET)
 	{
-		MessageBox(NULL, TEXT("Closing socket"), NULL, MB_OK);
+		// MessageBox(NULL, TEXT("Closing socket"), NULL, MB_OK);
 		// attempt a graceful close with handshake from the server
 		iResult = shutdown(_connectSocket, SD_SEND);
 		if (iResult != SOCKET_ERROR)
 		{
-			MessageBox(NULL, TEXT("Graceful socket close"), NULL, MB_OK);
+			// MessageBox(NULL, TEXT("Graceful socket close"), NULL, MB_OK);
 			// read all the data from the socket until the remote end disconnects nicely
 			while ((iResult = recv(_connectSocket, recvbuf, sizeof(recvbuf), 0)) > 0);
 		}
